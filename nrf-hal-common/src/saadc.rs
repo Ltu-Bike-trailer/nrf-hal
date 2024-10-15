@@ -32,8 +32,16 @@ use crate::pac::{saadc_ns as saadc, SAADC_NS as SAADC};
 #[cfg(not(any(feature = "9160", feature = "5340-app")))]
 use crate::pac::{saadc, SAADC};
 
-use core::sync::atomic::{compiler_fence, Ordering::SeqCst};
+use core::{
+    future::{Future, Ready},
+    intrinsics::unreachable,
+    sync::atomic::{compiler_fence, Ordering::SeqCst},
+};
 
+use nrf52840_pac::saadc::ch::{
+    pselp::{PSELP_A, PSELP_SPEC},
+    PSELP,
+};
 pub use saadc::{
     ch::config::{GAIN_A as Gain, REFSEL_A as Reference, RESP_A as Resistor, TACQ_A as Time},
     oversample::OVERSAMPLE_A as Oversample,
@@ -45,7 +53,7 @@ pub trait Channel: embedded_hal_02::adc::Channel<Saadc, ID = u8> {}
 
 #[cfg(not(feature = "embedded-hal-02"))]
 pub trait Channel {
-    fn channel() -> u8;
+    const CHANNEL: u8;
 }
 
 // Only 1 channel is allowed right now, a discussion needs to be had as to how
@@ -57,6 +65,11 @@ pub trait Channel {
 /// External analog channels supported by the SAADC implement the `Channel` trait.
 /// Currently, use of only one channel is allowed.
 pub struct Saadc(SAADC);
+
+pub struct Resolver<'a, const N: usize> {
+    saadc: &'a mut Saadc,
+    buffer: [i16; N],
+}
 
 impl Saadc {
     pub fn new(saadc: SAADC, config: SaadcConfig) -> Self {
@@ -104,10 +117,38 @@ impl Saadc {
         self.0
     }
 
+    /// Reads channels up until the specified index.
+    ///
+    /// NOTE: THIS IS VERY specialized for our usecase.
+    pub fn read_channels<'a>(&'a mut self, channels: &[u8]) -> Resolver<'a, 3> {
+        for (idx, channel) in channels.iter().enumerate() {
+            self.0.ch[idx].pselp.write(|w| match channel {
+                0 => w.pselp().analog_input0(),
+                1 => w.pselp().analog_input1(),
+                2 => w.pselp().analog_input2(),
+                3 => w.pselp().analog_input3(),
+                4 => w.pselp().analog_input4(),
+                5 => w.pselp().analog_input5(),
+                6 => w.pselp().analog_input6(),
+                7 => w.pselp().analog_input7(),
+                #[cfg(not(feature = "9160"))]
+                8 => w.pselp().vdd(),
+                #[cfg(any(feature = "52833", feature = "52840"))]
+                13 => w.pselp().vddhdiv5(),
+                _ => unreachable!(),
+            });
+        }
+        let mut ret = Resolver {
+            saadc: self,
+            buffer: [0; 3],
+        };
+        ret.start_sample();
+        ret
+    }
     /// Sample channel `PIN` for the configured ADC acquisition time in differential input mode.
     /// Note that this is a blocking operation.
-    pub fn read_channel<PIN: Channel>(&mut self, _pin: &mut PIN) -> Result<i16, ()> {
-        match PIN::channel() {
+    pub fn read_channel<PIN: Channel>(&mut self, _pin: &mut PIN) -> Resolver<i16> {
+        match PIN::CHANNEL {
             0 => self.0.ch[0].pselp.write(|w| w.pselp().analog_input0()),
             1 => self.0.ch[0].pselp.write(|w| w.pselp().analog_input1()),
             2 => self.0.ch[0].pselp.write(|w| w.pselp().analog_input2()),
@@ -124,36 +165,50 @@ impl Saadc {
             // pins have already been covered.
             _ => return Err(()),
         }
+        let mut ret = Resolver {
+            saadc: self,
+            buffer: [0; 1],
+        };
+        ret.start_sample();
+        ret
+    }
+}
 
-        let mut val: i16 = 0;
-        self.0
+impl<'a, const N: usize> Resolver<'a, N> {
+    #[allow(clippy::cast_possible_truncation)]
+    fn start_sample(&mut self) {
+        let raw_ptr = (&mut self.buffer) as *mut _;
+        self.saadc
+            .0
             .result
             .ptr
-            .write(|w| unsafe { w.ptr().bits(((&mut val) as *mut _) as u32) });
-        self.0
+            .write(|w| unsafe { w.ptr().bits(raw_ptr as u32) });
+        self.saadc
+            .0
             .result
             .maxcnt
-            .write(|w| unsafe { w.maxcnt().bits(1) });
+            .write(|w| unsafe { w.maxcnt().bits(N as u16) });
+        self.saadc
+            .0
+            .tasks_start
+            .write(|w| w.tasks_start().set_bit());
+        self.saadc
+            .0
+            .tasks_sample
+            .write(|w| w.tasks_sample().set_bit());
+    }
+}
 
-        // Conservative compiler fence to prevent starting the ADC before the
-        // pointer and maxcount have been set.
-        compiler_fence(SeqCst);
-
-        self.0.tasks_start.write(|w| unsafe { w.bits(1) });
-        self.0.tasks_sample.write(|w| unsafe { w.bits(1) });
-
-        while self.0.events_end.read().bits() == 0 {}
-        self.0.events_end.reset();
-
-        // Will only occur if more than one channel has been enabled.
-        if self.0.result.amount.read().bits() != 1 {
-            return Err(());
+impl<'a, const N: usize> Future for Resolver<'a, N> {
+    type Output = [i16; N];
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        if self.saadc.0.events_end.read().bits() == N as u32 {
+            return core::task::Poll::Ready(self.buffer);
         }
-
-        // Second fence to prevent optimizations creating issues with the EasyDMA-modified `val`.
-        compiler_fence(SeqCst);
-
-        Ok(val)
+        return core::task::Poll::Pending;
     }
 }
 
@@ -242,16 +297,14 @@ macro_rules! channel_mappings {
             impl<STATE> embedded_hal_02::adc::Channel<Saadc> for crate::gpio::p0::$pin<STATE> {
                 type ID = u8;
 
-                fn channel() -> u8 {
+                const fn channel() -> u8 {
                     $n
                 }
             }
 
             impl<STATE> Channel for crate::gpio::p0::$pin<STATE> {
                 #[cfg(not(feature = "embedded-hal-02"))]
-                fn channel() -> u8 {
-                    $n
-                }
+                const CHANNEL:u8 = $n;
             }
         )*
     };
@@ -285,7 +338,7 @@ channel_mappings! {
 impl embedded_hal_02::adc::Channel<Saadc> for InternalVdd {
     type ID = u8;
 
-    fn channel() -> u8 {
+    const fn channel() -> u8 {
         8
     }
 }
@@ -293,9 +346,7 @@ impl embedded_hal_02::adc::Channel<Saadc> for InternalVdd {
 #[cfg(not(feature = "9160"))]
 impl Channel for InternalVdd {
     #[cfg(not(feature = "embedded-hal-02"))]
-    fn channel() -> u8 {
-        8
-    }
+    const CHANNEL: u8 = 8;
 }
 
 #[cfg(not(feature = "9160"))]
@@ -306,7 +357,7 @@ pub struct InternalVdd;
 impl embedded_hal_02::adc::Channel<Saadc> for InternalVddHdiv5 {
     type ID = u8;
 
-    fn channel() -> u8 {
+    const fn channel() -> u8 {
         13
     }
 }
@@ -314,9 +365,7 @@ impl embedded_hal_02::adc::Channel<Saadc> for InternalVddHdiv5 {
 #[cfg(any(feature = "52833", feature = "52840"))]
 impl Channel for InternalVddHdiv5 {
     #[cfg(not(feature = "embedded-hal-02"))]
-    fn channel() -> u8 {
-        13
-    }
+    const CHANNEL: u8 = 13;
 }
 
 #[cfg(any(feature = "52833", feature = "52840"))]

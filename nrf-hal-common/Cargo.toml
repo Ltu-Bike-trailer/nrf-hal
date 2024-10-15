@@ -97,6 +97,7 @@ version = "0.3.7"
 optional = true
 
 [features]
+default = ["52840"]
 doc = []
 51 = ["nrf51-pac"]
 52805 = ["nrf52805-pac"]
