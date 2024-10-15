@@ -147,7 +147,7 @@ impl Saadc {
     }
     /// Sample channel `PIN` for the configured ADC acquisition time in differential input mode.
     /// Note that this is a blocking operation.
-    pub fn read_channel<PIN: Channel>(&mut self, _pin: &mut PIN) -> Resolver<i16> {
+    pub fn read_channel<'a, PIN: Channel>(&'a mut self, _pin: &mut PIN) -> Resolver<'a, 1> {
         match PIN::CHANNEL {
             0 => self.0.ch[0].pselp.write(|w| w.pselp().analog_input0()),
             1 => self.0.ch[0].pselp.write(|w| w.pselp().analog_input1()),
@@ -163,7 +163,7 @@ impl Saadc {
             13 => self.0.ch[0].pselp.write(|w| w.pselp().vddhdiv5()),
             // This can never happen with the `Channel` implementations provided, as the only analog
             // pins have already been covered.
-            _ => return Err(()),
+            _ => unreachable!(),
         }
         let mut ret = Resolver {
             saadc: self,
