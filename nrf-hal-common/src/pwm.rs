@@ -296,6 +296,12 @@ where
         }
     }
 
+    #[inline(always)]
+    /// Sets the mode for the to center align the pwm signal.
+    pub fn center_align(&self) {
+        self.pwm.mode.modify(|_r, w| w.updown().set_bit());
+    }
+
     // Internal helper function that returns 15 bit duty cycle value.
     #[inline(always)]
     fn duty_on_value(&self, index: usize) -> u16 {
