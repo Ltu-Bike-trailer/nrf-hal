@@ -32,16 +32,8 @@ use crate::pac::{saadc_ns as saadc, SAADC_NS as SAADC};
 #[cfg(not(any(feature = "9160", feature = "5340-app")))]
 use crate::pac::{saadc, SAADC};
 
-use core::{
-    future::{Future, Ready},
-    intrinsics::unreachable,
-    sync::atomic::{compiler_fence, Ordering::SeqCst},
-};
+use core::future::Future;
 
-use nrf52840_pac::saadc::ch::{
-    pselp::{PSELP_A, PSELP_SPEC},
-    PSELP,
-};
 pub use saadc::{
     ch::config::{GAIN_A as Gain, REFSEL_A as Reference, RESP_A as Resistor, TACQ_A as Time},
     oversample::OVERSAMPLE_A as Oversample,
