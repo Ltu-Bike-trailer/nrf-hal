@@ -34,6 +34,7 @@ use crate::pac::{saadc, SAADC};
 
 use core::sync::atomic::{compiler_fence, Ordering::SeqCst};
 
+use nrf52840_pac::gpiote::config;
 pub use saadc::{
     ch::config::{GAIN_A as Gain, REFSEL_A as Reference, RESP_A as Resistor, TACQ_A as Time},
     oversample::OVERSAMPLE_A as Oversample,
@@ -58,6 +59,191 @@ pub trait Channel {
 /// Currently, use of only one channel is allowed.
 pub struct Saadc(SAADC);
 
+pub struct SaadcTask<const CHANNELS: usize> {
+    buffer: [u16; CHANNELS],
+}
+
+impl<const CHANNELS: usize> SaadcTask<CHANNELS> {
+    fn ptr<'a>() -> &'a mut crate::pac::saadc::RegisterBlock {
+        unsafe { &mut *SAADC::PTR.cast_mut() }
+    }
+    pub fn new(
+        saadc: SAADC,
+        config: SaadcConfig,
+        channels: &[u8; CHANNELS],
+        buffer: [u16; CHANNELS],
+    ) -> Self {
+        // The write enums do not implement clone/copy/debug, only the
+        // read ones, hence the need to pull out and move the values.
+        let SaadcConfig {
+            resolution,
+            oversample,
+            reference,
+            gain,
+            resistor,
+            time,
+        } = config;
+        saadc.resolution.write(|w| w.val().variant(resolution));
+        saadc
+            .oversample
+            .write(|w| w.oversample().variant(oversample));
+        saadc.samplerate.write(|w| w.mode().task());
+        for (idx, ch) in channels.iter().enumerate() {
+            saadc.ch[idx].config.write(|w| {
+                w.refsel().variant(reference);
+                w.gain().variant(gain);
+                w.tacq().variant(time);
+                w.mode().se();
+                w.resp().variant(resistor);
+                w.resn().bypass();
+                w.burst().enabled();
+                w
+            });
+
+            match ch {
+                0 => saadc.ch[idx].pselp.write(|w| w.pselp().analog_input0()),
+                1 => saadc.ch[idx].pselp.write(|w| w.pselp().analog_input1()),
+                2 => saadc.ch[idx].pselp.write(|w| w.pselp().analog_input2()),
+                3 => saadc.ch[idx].pselp.write(|w| w.pselp().analog_input3()),
+                4 => saadc.ch[idx].pselp.write(|w| w.pselp().analog_input4()),
+                5 => saadc.ch[idx].pselp.write(|w| w.pselp().analog_input5()),
+                6 => saadc.ch[idx].pselp.write(|w| w.pselp().analog_input6()),
+                7 => saadc.ch[idx].pselp.write(|w| w.pselp().analog_input7()),
+                #[cfg(not(feature = "9160"))]
+                8 => saadc.ch[idx].pselp.write(|w| w.pselp().vdd()),
+                #[cfg(any(feature = "52833", feature = "52840"))]
+                13 => saadc.ch[idx].pselp.write(|w| w.pselp().vddhdiv5()),
+                // This can never happen with the `Channel` implementations provided, as the only analog
+                // pins have already been covered.
+                _ => panic!(),
+            }
+            saadc.ch[idx].pseln.write(|w| w.pseln().nc());
+        }
+
+        saadc.enable.write(|w| w.enable().set_bit());
+        // Calibrate
+        saadc.events_calibratedone.reset();
+        saadc.tasks_calibrateoffset.write(|w| unsafe { w.bits(1) });
+        //while saadc.events_calibratedone.read().bits() == 0 {}
+        saadc
+            .inten
+            .write(|w| w.end().set_bit().done().disabled().resultdone().clear_bit());
+        saadc.intenset.write(|w| {
+            w.end()
+                .set_bit()
+                .resultdone()
+                .clear_bit()
+                .done()
+                .clear_bit()
+        });
+        SaadcTask { buffer }
+    }
+
+    /// Starts a new measurements cycle.
+    pub fn start_sample(&mut self) {
+        let ptr = self.buffer.as_mut_ptr();
+        let saadc = Self::ptr();
+        saadc.events_end.reset();
+        saadc
+            .result
+            .ptr
+            .write(|w| unsafe { w.ptr().bits(ptr as u32) });
+        saadc
+            .result
+            .maxcnt
+            .write(|w| unsafe { w.maxcnt().bits(CHANNELS as u16) });
+        saadc.enable.write(|w| w.enable().set_bit());
+
+        // Conservative compiler fence to prevent starting the ADC before the
+        // pointer and maxcount have been set.
+        compiler_fence(SeqCst);
+
+        saadc.tasks_start.write(|w| w.tasks_start().set_bit());
+        saadc.tasks_sample.write(|w| w.tasks_sample().set_bit());
+        saadc.inten.write(|w| w.end().set_bit());
+        saadc.intenset.write(|w| w.end().set_bit());
+    }
+
+    /// Completes the previous measurement cycle and returns the values.
+    ///
+    /// This function takes a callback that allows for easy conversions.
+    pub fn complete_sample<T: Default + Copy, Callback: FnMut(u16) -> T>(
+        &self,
+        mut callback: Callback,
+    ) -> [T; CHANNELS] {
+        let saadc = Self::ptr();
+        // Conservative compiler fence to prevent starting the ADC before the
+        // pointer and maxcount have been set.
+        compiler_fence(SeqCst);
+
+        saadc.tasks_start.write(|w| unsafe { w.bits(1) });
+        saadc.tasks_sample.write(|w| unsafe { w.bits(1) });
+
+        while saadc.events_end.read().bits() == 0 {}
+        saadc.events_end.reset();
+
+        // Second fence to prevent optimizations creating issues with the EasyDMA-modified `val`.
+        compiler_fence(SeqCst);
+        let mut res = [T::default(); CHANNELS];
+        for (idx, val) in self.buffer.iter().enumerate() {
+            res[idx] = callback(*val);
+        }
+
+        res
+    }
+
+    pub fn sample_blocking<Callback: FnMut(u16) -> f32>(
+        &mut self,
+        mut callback: Callback,
+    ) -> Option<[f32; CHANNELS]> {
+        let ptr = self.buffer.as_mut_ptr();
+        let saadc = Self::ptr();
+        saadc.events_end.reset();
+        saadc
+            .result
+            .ptr
+            .write(|w| unsafe { w.ptr().bits(ptr as u32) });
+        saadc
+            .result
+            .maxcnt
+            .write(|w| unsafe { w.maxcnt().bits(CHANNELS as u16) });
+        saadc.enable.write(|w| w.enable().set_bit());
+
+        // Conservative compiler fence to prevent starting the ADC before the
+        // pointer and maxcount have been set.
+        compiler_fence(SeqCst);
+
+        saadc.tasks_start.write(|w| w.tasks_start().set_bit());
+        saadc.tasks_sample.write(|w| w.tasks_sample().set_bit());
+        saadc.inten.write(|w| w.end().clear_bit());
+        saadc.intenset.write(|w| w.end().clear_bit());
+
+        // Conservative compiler fence to prevent starting the ADC before the
+        // pointer and maxcount have been set.
+        compiler_fence(SeqCst);
+
+        saadc.tasks_start.write(|w| unsafe { w.bits(1) });
+        saadc.tasks_sample.write(|w| unsafe { w.bits(1) });
+        let mut count = 0;
+        while saadc.events_end.read().bits() == 0 {
+            count += 1;
+            if count > 10_000 {
+                return None;
+            }
+        }
+        saadc.events_end.reset();
+
+        // Second fence to prevent optimizations creating issues with the EasyDMA-modified `val`.
+        compiler_fence(SeqCst);
+        let mut res = [0.; CHANNELS];
+        for (idx, val) in self.buffer.iter().enumerate() {
+            res[idx] = callback(*val);
+        }
+
+        Some(res)
+    }
+}
+
 impl Saadc {
     pub fn new(saadc: SAADC, config: SaadcConfig) -> Self {
         // The write enums do not implement clone/copy/debug, only the
@@ -70,8 +256,6 @@ impl Saadc {
             resistor,
             time,
         } = config;
-
-        saadc.enable.write(|w| w.enable().enabled());
         saadc.resolution.write(|w| w.val().variant(resolution));
         saadc
             .oversample

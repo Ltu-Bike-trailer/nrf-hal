@@ -201,6 +201,29 @@ where
         self
     }
 
+    #[inline(always)]
+    /// Enables and disables the channels in correspondance with the PATTERN provided.
+    /// 
+    /// It modifies N registers in ascending order.
+    pub fn modify_channels<const PATTERN: u8,const N:usize>(&self) {
+        if N == 0 {
+            return
+        }
+        self.pwm.psel.out[0].modify(|_r, w| w.connect().bit(PATTERN & 0b1 != 0));
+        if N == 1 {
+            return
+        }
+        self.pwm.psel.out[1].modify(|_r, w| w.connect().bit(PATTERN & 0b10 != 0));
+        if N == 2 {
+            return
+        }
+        self.pwm.psel.out[2].modify(|_r, w| w.connect().bit(PATTERN & 0b100 != 0));
+        if N == 3 {
+            return
+        }
+        self.pwm.psel.out[3].modify(|_r, w| w.connect().bit(PATTERN & 0b1000 != 0));
+    }
+
     /// Disables a PWM channel.
     #[inline(always)]
     pub fn disable_channel(&self, channel: Channel) -> &Self {

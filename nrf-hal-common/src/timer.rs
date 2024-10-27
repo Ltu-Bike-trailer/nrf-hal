@@ -148,6 +148,19 @@ where
         self.0.timer_start(cycles)
     }
 
+    /// Sets the time target using ergonomic abstractions.
+    ///
+    /// See [`start`](Self::start) for further details.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn timeout<const NOM: u32, const DENOM: u32>(
+        &mut self,
+        time: fugit::Duration<u64, NOM, DENOM>,
+    ) {
+        let cycles: fugit::Duration<u64, 1, 1_000_000> = time.convert();
+        let cycles = cycles.ticks();
+        self.start(cycles as u32);
+    }
+
     /// If the timer has finished, resets it and returns true.
     ///
     /// Returns false if the timer is still running.
