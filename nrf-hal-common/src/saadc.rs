@@ -64,6 +64,7 @@ pub struct SaadcTask<const CHANNELS: usize> {
 }
 
 impl<const CHANNELS: usize> SaadcTask<CHANNELS> {
+    #[inline(always)]
     fn ptr<'a>() -> &'a mut crate::pac::saadc::RegisterBlock {
         unsafe { &mut *SAADC::PTR.cast_mut() }
     }
@@ -140,6 +141,7 @@ impl<const CHANNELS: usize> SaadcTask<CHANNELS> {
     }
 
     /// Starts a new measurements cycle.
+    #[inline(always)]
     pub fn start_sample(&mut self) {
         let ptr = self.buffer.as_mut_ptr();
         let saadc = Self::ptr();
@@ -179,11 +181,11 @@ impl<const CHANNELS: usize> SaadcTask<CHANNELS> {
         saadc.tasks_start.write(|w| unsafe { w.bits(1) });
         saadc.tasks_sample.write(|w| unsafe { w.bits(1) });
 
-        while saadc.events_end.read().bits() == 0 {}
+        //while saadc.events_end.read().bits() == 0 {}
         saadc.events_end.reset();
 
         // Second fence to prevent optimizations creating issues with the EasyDMA-modified `val`.
-        compiler_fence(SeqCst);
+        //compiler_fence(SeqCst);
         let mut res = [T::default(); CHANNELS];
         for (idx, val) in self.buffer.iter().enumerate() {
             res[idx] = callback(*val);
@@ -192,10 +194,10 @@ impl<const CHANNELS: usize> SaadcTask<CHANNELS> {
         res
     }
 
-    pub fn sample_blocking<Callback: FnMut(u16) -> f32>(
+    pub fn sample_blocking<T: Default + Copy, Callback: FnMut(u16) -> T>(
         &mut self,
         mut callback: Callback,
-    ) -> Option<[f32; CHANNELS]> {
+    ) -> Option<[T; CHANNELS]> {
         let ptr = self.buffer.as_mut_ptr();
         let saadc = Self::ptr();
         saadc.events_end.reset();
@@ -235,7 +237,7 @@ impl<const CHANNELS: usize> SaadcTask<CHANNELS> {
 
         // Second fence to prevent optimizations creating issues with the EasyDMA-modified `val`.
         compiler_fence(SeqCst);
-        let mut res = [0.; CHANNELS];
+        let mut res = [T::default(); CHANNELS];
         for (idx, val) in self.buffer.iter().enumerate() {
             res[idx] = callback(*val);
         }

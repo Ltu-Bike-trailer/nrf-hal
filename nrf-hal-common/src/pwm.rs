@@ -203,25 +203,45 @@ where
 
     #[inline(always)]
     /// Enables and disables the channels in correspondance with the PATTERN provided.
-    /// 
+    ///
     /// It modifies N registers in ascending order.
-    pub fn modify_channels<const PATTERN: u8,const N:usize>(&self) {
+    pub fn modify_channels<const PATTERN: u8, const N: usize>(&self) {
         if N == 0 {
-            return
+            return;
         }
-        self.pwm.psel.out[0].modify(|_r, w| w.connect().bit(PATTERN & 0b1 != 0));
-        if N == 1 {
-            return
+        if PATTERN & 0b1 != 0 {
+            self.enable_channel(Channel::C0);
         }
-        self.pwm.psel.out[1].modify(|_r, w| w.connect().bit(PATTERN & 0b10 != 0));
-        if N == 2 {
-            return
+        else {
+            self.disable_channel(Channel::C0);
         }
-        self.pwm.psel.out[2].modify(|_r, w| w.connect().bit(PATTERN & 0b100 != 0));
-        if N == 3 {
-            return
+        if N <= 1 {
+            return;
         }
-        self.pwm.psel.out[3].modify(|_r, w| w.connect().bit(PATTERN & 0b1000 != 0));
+        if PATTERN & 0b10 != 0 {
+            self.enable_channel(Channel::C1);
+        }
+        else {
+            self.disable_channel(Channel::C1);
+        }
+        if N <= 2 {
+            return;
+        }
+        if PATTERN & 0b100 != 0 {
+            self.enable_channel(Channel::C2);
+        }
+        else {
+            self.disable_channel(Channel::C2);
+        }
+        if N <= 3 {
+            return;
+        }
+        if PATTERN & 0b1000 != 0 {
+            self.enable_channel(Channel::C3);
+        }
+        else {
+            self.disable_channel(Channel::C3);
+        }
     }
 
     /// Disables a PWM channel.
@@ -361,7 +381,22 @@ where
             .ptr
             .write(|w| unsafe { w.bits(buffer as u32) });
         self.pwm.seq0.cnt.write(|w| unsafe { w.bits(1) });
-        self.start_seq(Seq::Seq0);
+        self.start_seq(Seq::Seq0).unwrap();
+    }
+
+    /// Does the same thing as [`set_duty_on_common`](Self::set_duty_on_common)
+    /// but without the checks.
+    #[inline(always)]
+    pub fn set_duty_on_common_unchecked(&self, duty: u16) {
+        let buffer = [duty; 4];
+        self.one_shot();
+        self.set_load_mode(LoadMode::Common);
+        self.pwm
+            .seq0
+            .ptr
+            .write(|w| unsafe { w.bits(buffer.as_ptr() as u32) });
+        self.pwm.seq0.cnt.write(|w| unsafe { w.bits(1) });
+        self.start_seq(Seq::Seq0).unwrap();
     }
 
     /// Sets inverted duty cycle (15 bit) for all PWM channels.
@@ -378,7 +413,7 @@ where
             .ptr
             .write(|w| unsafe { w.bits(buffer as u32) });
         self.pwm.seq0.cnt.write(|w| unsafe { w.bits(1) });
-        self.start_seq(Seq::Seq0);
+        self.start_seq(Seq::Seq0).unwrap();
     }
 
     /// Returns the common duty cycle value for all PWM channels in `Common` load mode.
@@ -407,7 +442,7 @@ where
             .ptr
             .write(|w| unsafe { w.bits(buffer as u32) });
         self.pwm.seq0.cnt.write(|w| unsafe { w.bits(2) });
-        self.start_seq(Seq::Seq0);
+        self.start_seq(Seq::Seq0).unwrap();
     }
 
     /// Sets inverted duty cycle (15 bit) for a PWM group.
@@ -424,7 +459,7 @@ where
             .ptr
             .write(|w| unsafe { w.bits(buffer as u32) });
         self.pwm.seq0.cnt.write(|w| unsafe { w.bits(2) });
-        self.start_seq(Seq::Seq0);
+        self.start_seq(Seq::Seq0).unwrap();
     }
 
     /// Returns duty cycle value for a PWM group.
@@ -453,7 +488,7 @@ where
             .ptr
             .write(|w| unsafe { w.bits(buffer as u32) });
         self.pwm.seq0.cnt.write(|w| unsafe { w.bits(4) });
-        self.start_seq(Seq::Seq0);
+        self.start_seq(Seq::Seq0).unwrap();
     }
 
     /// Sets inverted duty cycle (15 bit) for a PWM channel.
@@ -470,7 +505,7 @@ where
             .ptr
             .write(|w| unsafe { w.bits(buffer as u32) });
         self.pwm.seq0.cnt.write(|w| unsafe { w.bits(4) });
-        self.start_seq(Seq::Seq0);
+        self.start_seq(Seq::Seq0).unwrap();
     }
 
     /// Returns the duty cycle value for a PWM channel.
@@ -543,13 +578,20 @@ where
     /// Loads the first PWM value on all enabled channels from a sequence and starts playing that sequence.
     /// Causes PWM generation to start if not running.
     #[inline(always)]
-    pub fn start_seq(&self, seq: Seq) {
+    pub fn start_seq(&self, seq: Seq) -> Result<(), ()> {
         compiler_fence(Ordering::SeqCst);
         self.pwm.enable.write(|w| w.enable().enabled());
         self.pwm.tasks_seqstart[usize::from(seq)].write(|w| unsafe { w.bits(1) });
-        while self.pwm.events_seqstarted[usize::from(seq)].read().bits() == 0 {}
+        let mut counter = 0;
+        while self.pwm.events_seqstarted[usize::from(seq)].read().bits() == 0 {
+            counter += 1;
+            if counter > 1000000 {
+                return Err(());
+            }
+        }
         self.pwm.events_seqend[0].write(|w| w);
         self.pwm.events_seqend[1].write(|w| w);
+        Ok(())
     }
 
     /// Steps by one value in the current sequence on all enabled channels, if the `NextStep` step mode is selected.
@@ -561,10 +603,17 @@ where
 
     /// Stops PWM pulse generation on all channels at the end of current PWM period, and stops sequence playback.
     #[inline(always)]
-    pub fn stop(&self) {
+    pub fn stop(&self) -> Result<(), ()> {
         compiler_fence(Ordering::SeqCst);
         self.pwm.tasks_stop.write(|w| unsafe { w.bits(1) });
-        while self.pwm.events_stopped.read().bits() == 0 {}
+        let mut counter = 0;
+        while self.pwm.events_stopped.read().bits() == 0 {
+            counter += 1;
+            if counter > 1000000 {
+                return Err(());
+            }
+        }
+        Ok(())
     }
 
     /// Loads the given sequence buffers and optionally (re-)starts sequence playback.
@@ -597,7 +646,7 @@ where
             self.pwm.seq0.ptr.write(|w| unsafe { w.bits(ptr as u32) });
             self.pwm.seq0.cnt.write(|w| unsafe { w.bits(len as u32) });
             if start {
-                self.start_seq(Seq::Seq0);
+                self.start_seq(Seq::Seq0).unwrap();
             }
         } else {
             self.pwm.seq0.cnt.write(|w| unsafe { w.bits(0) });

@@ -108,6 +108,7 @@ where
     }
 
     /// Reset the interrupt event flag
+    #[inline(always)]
     pub fn reset_event(&self) {
         self.0.timer_reset_event()
     }
@@ -159,6 +160,7 @@ where
         let cycles: fugit::Duration<u64, 1, 1_000_000> = time.convert();
         let cycles = cycles.ticks();
         self.start(cycles as u32);
+        self.0.enable_interrupt();
     }
 
     /// If the timer has finished, resets it and returns true.
@@ -435,21 +437,25 @@ pub trait Instance: sealed::Sealed {
     }
 
     /// Resets event for CC\[0\] register.
+    #[inline(always)]
     fn timer_reset_event(&self) {
         self.as_timer0().events_compare[0].reset();
     }
 
     /// Cancels timer by setting it to stop mode and resetting the events.
+    #[inline(always)]
     fn timer_cancel(&self) {
         self.as_timer0().tasks_stop.write(|w| unsafe { w.bits(1) });
         self.timer_reset_event();
     }
 
     /// Checks if the timer is still running which means no event is yet generated for CC\[0\].
+    #[inline(always)]
     fn timer_running(&self) -> bool {
         self.as_timer0().events_compare[0].read().bits() == 0
     }
 
+    #[inline(always)]
     fn read_counter(&self) -> u32 {
         self.as_timer0().tasks_capture[1].write(|w| unsafe { w.bits(1) });
         self.as_timer0().cc[1].read().bits()
