@@ -166,6 +166,40 @@ impl<const CHANNELS: usize> SaadcTask<CHANNELS> {
         saadc.intenset.write(|w| w.end().set_bit());
     }
 
+    /// Prepares a sample. This is simply here to allow
+    pub fn prepare_sample(&mut self) {
+        let ptr = self.buffer.as_mut_ptr();
+        let saadc = Self::ptr();
+        saadc.events_end.reset();
+        saadc
+            .result
+            .ptr
+            .write(|w| unsafe { w.ptr().bits(ptr as u32) });
+        saadc
+            .result
+            .maxcnt
+            .write(|w| unsafe { w.maxcnt().bits(CHANNELS as u16) });
+        saadc.enable.write(|w| w.enable().set_bit());
+
+        // Conservative compiler fence to prevent starting the ADC before the
+        // pointer and maxcount have been set.
+        compiler_fence(SeqCst);
+
+        saadc.tasks_start.write(|w| w.tasks_start().set_bit());
+    }
+
+    /// Reads the buffer returning the converted values.
+    pub fn read_buffer<T: Default + Copy, Callback: FnMut(u16) -> T>(
+        &mut self,
+        mut callback: Callback,
+    ) -> [T; CHANNELS] {
+        let mut res = [T::default(); CHANNELS];
+        for (idx, val) in self.buffer.iter().enumerate() {
+            res[idx] = callback(*val);
+        }
+        res
+    }
+
     /// Completes the previous measurement cycle and returns the values.
     ///
     /// This function takes a callback that allows for easy conversions.

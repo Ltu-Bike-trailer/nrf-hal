@@ -65,7 +65,7 @@ where
     /// Sets the PWM clock prescaler.
     #[inline(always)]
     pub fn prescaler(&self) -> Prescaler {
-        match self.pwm.prescaler.read().prescaler().bits() {
+        match self.pwm.prescaler.read().prescaler().bits() & 0b111 {
             0 => Prescaler::Div1,
             1 => Prescaler::Div2,
             2 => Prescaler::Div4,
@@ -205,14 +205,13 @@ where
     /// Enables and disables the channels in correspondance with the PATTERN provided.
     ///
     /// It modifies N registers in ascending order.
-    pub fn modify_channels<const PATTERN: u8, const N: usize>(&self) {
+    pub fn modify_channels<const PATTERN: usize, const N: usize>(&self) {
         if N == 0 {
             return;
         }
         if PATTERN & 0b1 != 0 {
             self.enable_channel(Channel::C0);
-        }
-        else {
+        } else {
             self.disable_channel(Channel::C0);
         }
         if N <= 1 {
@@ -220,8 +219,7 @@ where
         }
         if PATTERN & 0b10 != 0 {
             self.enable_channel(Channel::C1);
-        }
-        else {
+        } else {
             self.disable_channel(Channel::C1);
         }
         if N <= 2 {
@@ -229,8 +227,7 @@ where
         }
         if PATTERN & 0b100 != 0 {
             self.enable_channel(Channel::C2);
-        }
-        else {
+        } else {
             self.disable_channel(Channel::C2);
         }
         if N <= 3 {
@@ -238,8 +235,7 @@ where
         }
         if PATTERN & 0b1000 != 0 {
             self.enable_channel(Channel::C3);
-        }
-        else {
+        } else {
             self.disable_channel(Channel::C3);
         }
     }
@@ -298,7 +294,7 @@ where
     /// Returns how a sequence is read from RAM and is spread to the compare register.
     #[inline(always)]
     pub fn load_mode(&self) -> LoadMode {
-        match self.pwm.decoder.read().load().bits() {
+        match self.pwm.decoder.read().load().bits() & 0b11 {
             0 => LoadMode::Common,
             1 => LoadMode::Grouped,
             2 => LoadMode::Individual,
@@ -369,6 +365,7 @@ where
 
     /// Sets duty cycle (15 bit) for all PWM channels.
     /// Will replace any ongoing sequence playback.
+    #[inline(always)]
     pub fn set_duty_on_common(&self, duty: u16) {
         let buffer = T::buffer();
         unsafe {
@@ -905,50 +902,35 @@ where
     #[inline(always)]
     pub fn split(mut self) -> (Option<B0>, Option<B1>, Pwm<T>) {
         compiler_fence(Ordering::SeqCst);
-        let inner = self
-            .inner
-            .take()
-            .unwrap_or_else(|| unsafe { core::hint::unreachable_unchecked() });
+        let inner = unsafe { self.inner.take().unwrap_unchecked() };
         (inner.seq0_buffer, inner.seq1_buffer, inner.pwm)
     }
 
     /// Stops PWM generation.
     #[inline(always)]
     pub fn stop(&self) {
-        let inner = self
-            .inner
-            .as_ref()
-            .unwrap_or_else(|| unsafe { core::hint::unreachable_unchecked() });
+        let inner = unsafe { self.inner.as_ref().unwrap_unchecked() };
         inner.pwm.stop();
     }
 
     /// Starts playing the given sequence.
     #[inline(always)]
     pub fn start_seq(&self, seq: Seq) {
-        let inner = self
-            .inner
-            .as_ref()
-            .unwrap_or_else(|| unsafe { core::hint::unreachable_unchecked() });
+        let inner = unsafe { self.inner.as_ref().unwrap_unchecked() };
         inner.pwm.start_seq(seq);
     }
 
     /// Checks if the given event has been triggered.
     #[inline(always)]
     pub fn is_event_triggered(&self, event: PwmEvent) -> bool {
-        let inner = self
-            .inner
-            .as_ref()
-            .unwrap_or_else(|| unsafe { core::hint::unreachable_unchecked() });
+        let inner = unsafe { self.inner.as_ref().unwrap_unchecked() };
         inner.pwm.is_event_triggered(event)
     }
 
     /// Marks the given event as handled.
     #[inline(always)]
     pub fn reset_event(&self, event: PwmEvent) {
-        let inner = self
-            .inner
-            .as_ref()
-            .unwrap_or_else(|| unsafe { core::hint::unreachable_unchecked() });
+        let inner = unsafe { self.inner.as_ref().unwrap_unchecked() };
         inner.pwm.reset_event(event)
     }
 }
