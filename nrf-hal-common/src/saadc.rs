@@ -217,6 +217,8 @@ impl<const CHANNELS: usize> SaadcTask<CHANNELS> {
 
         //while saadc.events_end.read().bits() == 0 {}
         saadc.events_end.reset();
+        saadc.intenclr.write(|w| w.end().set_bit());
+        //saadc.status.read().status().;
 
         // Second fence to prevent optimizations creating issues with the EasyDMA-modified `val`.
         //compiler_fence(SeqCst);
